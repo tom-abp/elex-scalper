@@ -24,7 +24,7 @@ export async function placeBets(bestBets: BestBetsForMarket, size: number, betfa
     }
   }
 
-  console.log(results);
+  return results;
 }
 
 async function executeBetBetfair(bet: Bet, size: number, betfair: ExchangeApi){
