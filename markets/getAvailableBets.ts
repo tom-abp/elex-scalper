@@ -1,11 +1,12 @@
 import _ from 'lodash';
 import { ElectionMarket, electionMarkets } from "../data/electionMarkets";
 import { ClobClient, OrderSummary, Side } from "@polymarket/clob-client";
-import { Bet, Direction Polarity } from "./types";
+import { Bet, Direction } from "./types";
 import { ExchangeApi, ListMarketBookRequest, PriceSize, Runner } from "@b3t/betfair-ts";
-import { DEFAULT_BETFAIR_PROFIT_RATE, USD_GBP } from "../consts";
+import { USD_GBP } from "../consts";
+import { gatherMarketIds, gatherPolymarketSelections } from './lib';
 
-export async function getAvailableBets(betfair: ExchangeApi, poly: ClobClient, market: ElectionMarket){
+export async function getAvailableBets(betfair: ExchangeApi, poly: ClobClient, market: ElectionMarket): Promise<Bet[]>{
   return [
     ...await getBetfairPrices(betfair, market),
     ...await getPolymarketPrices(poly, market)
@@ -14,7 +15,14 @@ export async function getAvailableBets(betfair: ExchangeApi, poly: ClobClient, m
 
 export async function getAllAvailableBets(betfair: ExchangeApi, poly: ClobClient){
   const promises = electionMarkets.map(m => getAvailableBets(betfair, poly, m));
-  return Promise.all(promises)
+  const results = await Promise.all(promises)
+  
+  return results.reduce<Record<string, Bet[]>>((obj, v, i) => {
+    return{
+      ...obj,
+      [electionMarkets[i].name]: v
+    }
+  }, {});
 }
 
 export async function getBetfairPrices(betfair: ExchangeApi, market: ElectionMarket): Promise<Bet[]>{
@@ -51,24 +59,14 @@ export async function getPolymarketPrices(poly: ClobClient, market: ElectionMark
     const otherRunner = a[i === 0 ? 1 : 0].name;
 
     return [
-      ...o.orderBook.asks.map(ps => polyToOption(ps, Side.BUY, thisRunner, market, o.tokenId)),
-      ...o.orderBook.bids.map(ps => polyToOption(ps, Side.SELL, otherRunner, market, o.tokenId))
+      ...o.orderBook.asks.map(ps => polyToOption(ps, Side.BUY, thisRunner, market.name, o.tokenId)),
+      ...o.orderBook.bids.map(ps => polyToOption(ps, Side.SELL, otherRunner, market.name, o.tokenId))
     ];
   });
 
   return prices;
 }
 
-function gatherMarketIds(market: ElectionMarket){
-  return _.uniq(_.valuesIn(market.marketsByOption).flatMap(v => v.betfair.marketId));
-}
-
-function gatherPolymarketSelections(market: ElectionMarket){
-  return _.valuesIn(market.marketsByOption).flatMap(v => v.polymarket.map(p => ({
-    name: v.name,
-    ...p,
-  })));
-}
 
 async function getOrderBooks(poly: ClobClient, market: ElectionMarket){
   const selections = gatherPolymarketSelections(market);
@@ -103,67 +101,50 @@ async function getMarketBooks(betfair: ExchangeApi, marketIds: string[]){
   return await betfair.listMarketBook(params);
 }
 
-function polyToOption<T extends string = string>(b: OrderSummary, side: Side, selection: T, market: ElectionMarket, tokenId: string): Bet{
-  const price = 1 / parseFloat(b.price);
-  const liability = price - 1;
-  const direction = side === Side.BUY ? 'BACK' : 'LAY';
-  const layRatio = 1 / liability;
-  const profitOnSelection = direction === 'BACK' ? liability : layRatio * -1;
-  const profitOnRest = direction === 'BACK' ? -1 : layRatio;  
-  const comparisonPrice = direction === 'BACK' ? price : 1 / price;
+function polyToOption<T extends string = string>(b: OrderSummary, side: Side, winsIf: T, market: string, tokenId: string): Bet{
+  const quotePrice = parseFloat(b.price) * 100;
+  const winChance = side === 'BUY' ? quotePrice : 100 - quotePrice;
 
   return{
-    price: comparisonPrice,
+    market,
+    winChance,
     availableGBP: parseFloat(b.size) * USD_GBP,
-    selection,
+    winsIf, 
     lookup:{
       location: 'POLYMARKET',
       tokenId,
       side,
-      price: parseInt(b.price),
+      price: quotePrice,
       size: parseInt(b.size)
     },
-    profitIf: _.keysIn(market.marketsByOption).reduce<Bet['profitIf']>((obj, outcome) => {
-      const profit = outcome === selection ? profitOnSelection : profitOnRest;
-      return{
-        ...obj,
-        [outcome]: profit > 0 ? profit * DEFAULT_BETFAIR_PROFIT_RATE : profit
-      };
-    }, {})
   }
 }
 
 
-function bfToOption<T extends string = string>(b: PriceSize, direction: Direction, selection: T, market: ElectionMarket): Bet<T>{
-  const price = b.getPrice();
-  const comparisonPrice = direction === 'BACK' ? price : (1 / (1 - (1 / price)));
+function bfToOption<T extends string = string>(b: PriceSize, direction: Direction, winsIf: T, market: ElectionMarket): Bet<T>{
+  const quotePrice = b.getPrice();
+  const decimalPrice = 100 / quotePrice;
+  const winChance = direction === 'BACK' ? decimalPrice : 100 - decimalPrice;
   const size = b.getSize();
-  const liability = price - 1;
-  const layRatio = 1 / liability;
-  const profitOnSelection = direction === 'BACK' ? liability : layRatio * -1;
-  const profitOnRest = direction === 'BACK' ? -1 : layRatio;  
-  const {marketId, selectionId} = market.marketsByOption[selection].betfair;
+  const runners = market.options;
+  const lookupKey = direction === 'BACK' ? winsIf : runners.find(r => r !== winsIf);
+
+  if(!lookupKey) throw new Error('No Lookup Key');
+  const {marketId, selectionId} = market.marketsByOption[lookupKey].betfair;
 
 
   return{
-    price,
+    market: market.name,
+    winChance,
     availableGBP: b.getSize(),
-    direction,
-    selection,
+    winsIf,
     lookup:{
       location: 'BETFAIR',
       selectionId,
       marketId,
       direction,
-      price,
+      price: quotePrice,
       size
     },
-    profitIf: _.keysIn(market.marketsByOption).reduce<Bet['profitIf']>((obj, outcome) => {
-      const profit = outcome === selection ? profitOnSelection : profitOnRest;
-      return{
-        ...obj,
-        [outcome]: profit > 0 ? profit * DEFAULT_BETFAIR_PROFIT_RATE : profit
-      };
-    }, {})
   };
 }

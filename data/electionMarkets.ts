@@ -1,10 +1,10 @@
 import { Side } from "@polymarket/clob-client";
 
-export type ElectionMarket<T extends string = string> = {
+export type ElectionMarket<T1 extends string = string, T2 extends string = string> = {
   name: string;
-  options: T[];
-  marketsByOption: Record<T, {
-    name: T;
+  options: [T1, T2];
+  marketsByOption: Record<T1 | T2, {
+    name: T1 | T2;
     betfair:{
       marketId: string;
       selectionId: number;
@@ -89,23 +89,11 @@ export const electionMarkets: ElectionMarket[] = [
     }
   },
   {
-    name: "Trump wins EC by >= 100",
+    name: "Harris wins +99.5",
     options: ['YES', 'NO'],
     marketsByOption:{
       YES:{
         name: "YES",
-        betfair:{
-          marketId: "1.233466024",
-          selectionId: 74201729
-        },
-        polymarket:[
-          {
-            tokenId: "703472062584814411408587996212205203179646194812695742911123851861537110765",
-          },
-        ]
-      },
-      NO:{
-        name: "NO",
         betfair:{
           marketId: "1.233466024",
           selectionId: 74201728
@@ -115,26 +103,26 @@ export const electionMarkets: ElectionMarket[] = [
             tokenId: "110182611589505704176280883941585275200645249037402942463797356777944882171668",
           },
         ]
+      },
+      NO:{
+        name: "NO",
+        betfair:{
+          marketId: "1.233466024",
+          selectionId: 74201729
+        },
+        polymarket:[
+          {
+            tokenId: "703472062584814411408587996212205203179646194812695742911123851861537110765",
+          },
+        ]
       }
     }
   },{
-    name: "Harris wins EC by >= 100",
+    name: "Trump wins +99.5",
     options: ['YES', 'NO'],
     marketsByOption:{
       YES:{
         name: "YES",
-        betfair:{
-          marketId: "1.233466210",
-          selectionId: 74201733
-        },
-        polymarket:[
-          {
-            tokenId: "112108601397974887983591943696951163631741323956587739399052689080303791907532",
-          },
-        ]
-      },
-      NO:{
-        name: "NO",
         betfair:{
           marketId: "1.233466210",
           selectionId: 11702573
@@ -142,6 +130,18 @@ export const electionMarkets: ElectionMarket[] = [
         polymarket:[
           {
             tokenId: "53373081615068277016949051309674773846670616322581148620168701506482046206044",
+          },
+        ]
+      },
+      NO:{
+        name: "NO",
+        betfair:{
+          marketId: "1.233466210",
+          selectionId: 74201733
+        },
+        polymarket:[
+          {
+            tokenId: "112108601397974887983591943696951163631741323956587739399052689080303791907532",
           },
         ]
       }

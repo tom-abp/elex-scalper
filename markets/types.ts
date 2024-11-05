@@ -19,27 +19,44 @@ export type PolymarketLookup = {
   size: number;
 }
 
-export type Bet<T extends string = string> = {
-  pricePercent: number;
-  sizeAvailable: number;
+export type Bet<T1 extends string = string, T2 extends string = string> = {
+  market: string;
+  winChance: number;
   availableGBP: number;
-  winsIf: T;
+  winsIf: T1 | T2;
   lookup: PolymarketLookup | BetfairLookup;
 }
 
-export type PositionSummary = {
-  name: string;
-  profitBySelection: Record<string, number>;
-  bets: Bet[];
+export type ExistingBet<T1 extends string = string, T2 extends string = string> = Omit<Bet<T1, T2>, 'availableGBP'> & {
+  sizeGBP: number;
 }
-export type Analysis = {
+
+export type TotalisedPosition<T1 extends string = string, T2 extends string = string> = {
+  market: string;
+  avgWinChance: number;
+  sizeGBP: number;
+  winsIf: T1 | T2;
+}
+
+export type BestBetsForMarket = {
+  market: string;
   edge: number;
   bets: Bet[];
-  name: string;
-  sellBets: Bet[][];
 };
 
-export type CurrentPositionGrouping<T extends string = string> = {
-  BETFAIR: Record<T, number>;
-  POLYMARKET: Record<string, Record<T, number>>;
+export type Exposure<T1 extends string = string, T2 extends string = string> = Record<T1 | T2, number>
+
+export type MarketPosition<T1 extends string = string, T2 extends string = string> = {
+  market: string;
+  bets: ExistingBet[];
+  edgeInPosition: number;
+  positionSummary: [TotalisedPosition, TotalisedPosition];
+  exposure: Exposure<T1, T2>;
+};
+
+export type AllPositions = Record<string, MarketPosition>;
+
+export type SellMethod<T extends 'BETFAIR' | 'POLYMARKET'> = {
+  direction: T extends 'BETFAIR' ? Direction : Side;
+  selection: T extends 'BETFAIR' ? number : string;
 }

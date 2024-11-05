@@ -1,66 +1,90 @@
 import { CurrentOrderSummary, ExchangeApi, ListCurrentOrdersRequest } from "@b3t/betfair-ts";
 import _ from 'lodash';
 import { ClobClient, Trade, Side } from "@polymarket/clob-client";
-import { Bet, ExistingBet, PositionSummary } from "./types";
+import { AllPositions, Bet, ExistingBet, Exposure, TotalisedPosition } from "./types";
 import { USD_GBP } from "../consts";
-import { electionMarkets } from "../data/electionMarkets";
+import { ElectionMarket, electionMarkets } from "../data/electionMarkets";
+import { percentToDecimal } from "./lib";
+import { findBestSellBets } from "./findBestSellBets";
 
-export async function getCurrentPositions(betfair: ExchangeApi, polymarket: ClobClient){
+export async function getCurrentPositions(betfair: ExchangeApi, polymarket: ClobClient): Promise<AllPositions>{
   const polyTrades = await polymarket.getTrades();
   const betfairTrades = await getBetfairOrders(betfair);
 
   const polyBets = _.compact(polyTrades.map(t => polyTradeToExistingBet(t)));
   const betfairBets = _.compact(betfairTrades.map(t => betfairTradeToExistingBet(t)));
 
-  const existingBets = [...polyBets, ...betfairBets];
-  const summary = summarisePositions(existingBets);
-  
-  return summary;
-}
+  const allBets = [...polyBets, ...betfairBets];
+  const byMarket = _.groupBy(allBets, bet => bet.market);
 
-export function summarisePositions(bets: ExistingBet[]): PositionSummary[]{
-  const mapped = bets.reduce<Record<string, PositionSummary>>((obj, bet) => {
-    const current = obj[bet.name] || {
-      name: bet.name,
-      bets: [],
-      profitBySelection: {}
-    };
+  return _.mapValues(byMarket, bets => {
+    if(!bets.length) throw new Error('Whaaaat?');
 
-    current.bets.push(bet);
+    const market = electionMarkets.find(m => m.name === bets[0].market);
+    if(!market) throw new Error('No market');
+
+    const positionSummary = totalisePositions(allBets, market);
+    const exposure = findExposure(positionSummary, market);
 
     return{
-      ...obj,
-      [bet.name]: current
+      market: market.name,
+      bets,
+      positionSummary,
+      edgeInPosition: 100 - (positionSummary[0].avgWinChance + positionSummary[1].avgWinChance),
+      exposure,
     };
-  }, {});
-
-  return _.values(mapped).map(s => {
-    s.profitBySelection = calcProfitPositionFromBets(s);
-    return s;
   });
 }
 
-export function calcProfitPositionFromBets(summary: PositionSummary): PositionSummary['profitBySelection']{
-  const market = electionMarkets.find(m => m.name === summary.name);
-  if(!market) return {};
+export function findExposure([s1, s2]: [TotalisedPosition, TotalisedPosition], market: ElectionMarket): Exposure{
+  const [o1, o2] = market.options;
+  const [p1, p2] = [percentToDecimal(s1.avgWinChance) - 1, percentToDecimal(s2.avgWinChance) - 1];
 
-  const selections = market.options;
-  const initObj = selections.reduce((o, s) => ({...o, [s]: 0}), {});
+  const e1 = (s2.sizeGBP * -1) + (p1 * s1.sizeGBP);
+  const e2 = (s1.sizeGBP * -1) + (p2 * s2.sizeGBP);
 
-    return summary.bets.reduce<PositionSummary['profitBySelection']>((obj, bet) => {
-      const {availableGBP, price, direction} = bet;
-      const selectionResult = direction === 'BACK' ? availableGBP * (price - 1) : availableGBP * -1;
-      const otherResult = direction === 'BACK' ? availableGBP * -1 : availableGBP * (price - 1);
-      console.log(bet, selectionResult, otherResult);
-      
-      selections.forEach((selection) => {
-        if(selection === bet.selection) obj[selection] += selectionResult;
-        else obj[selection] += otherResult;
-      });
-
-      return obj;
-    }, initObj);
+  return{
+    [o1]: Number.isNaN(e1) ? 0 : e1,
+    [o2]: Number.isNaN(e2) ? 0 : e2
+  };
 }
+
+export function totalisePositions(bets: ExistingBet[], market: ElectionMarket): [TotalisedPosition, TotalisedPosition]{
+  const [w1, w2] = market.options;
+  const DEFAULT_OBJ = {
+    [w1]:{
+      totalSize: 0,
+      winChanceProduct: 0,
+    },
+    [w2]:{
+      totalSize: 0,
+      winChanceProduct: 0,
+    }
+  };
+
+  const summary = bets.reduce<typeof DEFAULT_OBJ>((obj, bet) => {
+    obj[bet.winsIf].totalSize += bet.sizeGBP;
+    obj[bet.winsIf].winChanceProduct += (bet.sizeGBP * bet.winChance);
+
+    return obj;
+  }, DEFAULT_OBJ);
+
+  return[
+    {
+      market: market.name,
+      winsIf: w1,
+      sizeGBP: summary[w1].totalSize,
+      avgWinChance: summary[w1].winChanceProduct / summary[w1].totalSize
+    },
+    {
+      market: market.name,
+      winsIf: w2,
+      sizeGBP: summary[w2].totalSize,
+      avgWinChance: summary[w2].winChanceProduct / summary[w2].totalSize
+    },
+  ];
+}
+
 
 export async function getBetfairOrders(betfair: ExchangeApi, existing: CurrentOrderSummary[] = []){
   const params = new ListCurrentOrdersRequest({
@@ -77,41 +101,49 @@ export async function getBetfairOrders(betfair: ExchangeApi, existing: CurrentOr
 
 function betfairTradeToExistingBet(trade: CurrentOrderSummary): ExistingBet | null{
   const direction = trade.getSide().getValue() === 'BACK' ? 'BACK' : 'LAY';
-  const {name, selection} = findBetfairSelectionAndName(trade.getSelectionId()) || {};
-  if(!selection || !name) return null;
+  const {market, selection} = findBetfairSelectionAndMarket(trade.getSelectionId()) || {};
+  const electionMarket = electionMarkets.find(m => m.name === market);
+  const winsIf = selection === 'BACK' ? selection : electionMarket?.options.find(v => v !== selection);
+  const price = trade.getAveragePriceMatched();
 
+  if(!selection || !market || !price || !electionMarket || !winsIf) return null;
+
+  const pricePercent = 100 / price;
+  const winChance = direction === 'BACK' ? pricePercent : 100 - pricePercent;
 
   return{
-    name,
-    price: trade.getAveragePriceMatched() || 0,
-    availableGBP: trade.getSizeMatched() || 0,
-    direction, 
-    selection,
+    market,
+    winChance,
+    sizeGBP: trade.getSizeMatched() || 0, 
+    winsIf,
     lookup:{
       location: 'BETFAIR',
       selectionId: trade.getSelectionId(),
       marketId: trade.getMarketId(),
       direction,
-      price: trade.getAveragePriceMatched() || 0,
+      price: price,
       size: trade.getSizeMatched() || 0,
     },
   }
 }
 
 function polyTradeToExistingBet(trade: Trade): ExistingBet | null{
-  const direction = trade.side === Side.BUY ? 'BACK' : 'LAY';
   const tokenId = trade.asset_id;
-  const {name, selection} = findPolymarketSelectionAndName(tokenId) || {};
+  const {market, selection} = findPolymarketSelectionAndMarket(tokenId) || {};
+  const electionMarket = electionMarkets.find(m => m.name === market);
+  const winsIf = selection === 'BACK' ? selection : electionMarket?.options.find(v => v !== selection);
 
-  if(!selection || !name) return null;
+  if(!selection || !market || !electionMarket || !winsIf) return null;
 
-  console.log(trade.size, USD_GBP);
+  const quotePrice = parseFloat(trade.price);
+  const pricePercent = 100 * quotePrice;
+  const winChance = trade.side === Side.BUY ? pricePercent : 100 - pricePercent;
+
   return {
-    name,
-    price: 1 / parseFloat(trade.price),
-    availableGBP: (parseFloat(trade.size) * parseFloat(trade.price)) * USD_GBP,
-    direction,
-    selection,
+    market,
+    winChance,
+    sizeGBP: parseFloat(trade.size) * quotePrice * USD_GBP,
+    winsIf,
     lookup:{
       location: 'POLYMARKET',
       tokenId,
@@ -122,14 +154,14 @@ function polyTradeToExistingBet(trade: Trade): ExistingBet | null{
   };
 }
 
-type SelectionAndName = {
-  name: string;
-  selection: string
+type SelectionAndMarket = {
+  selection: string;
+  market: string
 } | null;
 
 
-function findPolymarketSelectionAndName(tokenId: string): SelectionAndName{
-  return electionMarkets.reduce<SelectionAndName>((val, market) => {
+function findPolymarketSelectionAndMarket(tokenId: string): SelectionAndMarket{
+  return electionMarkets.reduce<SelectionAndMarket>((val, market) => {
     if(val) return val;
 
     const selection = _.values(market.marketsByOption).reduce<string | null>((v, o) => {
@@ -141,13 +173,13 @@ function findPolymarketSelectionAndName(tokenId: string): SelectionAndName{
 
     return selection ? {
       selection,
-      name: market.name
+      market: market.name
     } : null;
   }, null);
 }
 
-function findBetfairSelectionAndName(selectionId: number){
-  return electionMarkets.reduce<SelectionAndName>((val, market) => {
+function findBetfairSelectionAndMarket(selectionId: number){
+  return electionMarkets.reduce<SelectionAndMarket>((val, market) => {
     if(val) return val;
 
     const selection = _.values(market.marketsByOption).reduce<string | null>((v, o) => {
@@ -159,7 +191,7 @@ function findBetfairSelectionAndName(selectionId: number){
 
     return selection ? {
       selection,
-      name: market.name
+      market: market.name
     } : null;
   }, null);
 }
